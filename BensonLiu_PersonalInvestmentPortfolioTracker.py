@@ -1,0 +1,532 @@
+import math
+import time
+import tkinter as tk
+from tkinter import ttk, messagebox
+from dataclasses import dataclass
+from typing import List
+
+import requests
+import numpy as np
+import pandas as pd
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.figure import Figure
+
+API_KEY = "GA5SML3JYK04GYPD"
+BASE_URL = "https://www.alphavantage.co/query"
+TRADING_DAYS = 252
+BENCHMARK = "SPY"
+
+BG = "#f8fafc"
+CARD = "#ffffff"
+TEXT = "#0f172a"
+SUBTLE = "#475569"
+PIE_COLORS = ["#2563eb", "#0f766e", "#7c3aed", "#ea580c", "#0891b2", "#65a30d"]
+
+
+@dataclass
+class Holding:
+    ticker: str
+    allocation: float
+    price: float = 0.0
+    ret: float = 0.0
+    vol: float = 0.0
+
+
+def fmt_money(value: float) -> str:
+    return f"${value:,.2f}"
+
+
+def fmt_pct(value: float, digits: int = 2) -> str:
+    return f"{value:.{digits}f}%"
+
+
+def fetch_daily_data(symbol: str):
+    params = {
+        "function": "TIME_SERIES_DAILY",
+        "symbol": symbol,
+        "apikey": API_KEY,
+        "outputsize": "compact",
+    }
+
+    try:
+        r = requests.get(BASE_URL, params=params, timeout=20)
+        r.raise_for_status()
+        data = r.json()
+    except requests.RequestException as e:
+        raise ValueError(f'Could not fetch "{symbol}"') from e
+
+    if "Error Message" in data:
+        raise ValueError(f'Could not fetch "{symbol}"')
+
+    if "Note" in data:
+        raise ValueError(
+            f'Could not fetch "{symbol}"\n\n'
+            "Alpha Vantage rate limit reached. Wait about 1 minute and try again."
+        )
+
+    if "Information" in data:
+        raise ValueError(
+            f'Could not fetch "{symbol}"\n\n'
+            f'API response: {data["Information"]}'
+        )
+
+    if "Time Series (Daily)" not in data:
+        raise ValueError(
+            f'Could not fetch "{symbol}"\n\nUnexpected API response.'
+        )
+
+    df = pd.DataFrame.from_dict(data["Time Series (Daily)"], orient="index")
+    df = df.astype(float)
+    df.index = pd.to_datetime(df.index)
+    df.sort_index(inplace=True)
+
+    prices = df["4. close"]
+    returns = prices.pct_change().dropna()
+
+    if prices.empty or returns.empty:
+        raise ValueError(f'Could not fetch "{symbol}"\n\nNo usable price history returned.')
+
+    return prices, returns
+
+
+def compute_metrics(returns: pd.Series):
+    annual_return = returns.mean() * TRADING_DAYS * 100
+    volatility = returns.std() * np.sqrt(TRADING_DAYS) * 100
+    return annual_return, volatility
+
+
+class App:
+    def __init__(self, root: tk.Tk):
+        self.root = root
+        self.root.title("Portfolio Investment Tracker")
+        self.root.geometry("1480x920")
+        self.root.configure(bg=BG)
+        self.root.minsize(1280, 800)
+
+        self.style = ttk.Style()
+        self.style.theme_use("clam")
+        self._configure_styles()
+
+        self.entries: List[dict] = []
+        self.metric_values = {}
+        self.summary_values = {}
+        self.risk_values = {}
+
+        self._build_ui()
+        self.add_row("MU", 40)
+        self.add_row("MSFT", 35)
+        self.add_row("AAPL", 25)
+        self.update_allocation_status()
+
+    def _configure_styles(self):
+        self.style.configure("TFrame", background=BG)
+        self.style.configure("Card.TFrame", background=CARD, relief="flat")
+        self.style.configure("Title.TLabel", background=BG, foreground=TEXT, font=("Segoe UI", 22, "bold"))
+        self.style.configure("SubTitle.TLabel", background=BG, foreground=SUBTLE, font=("Segoe UI", 10))
+        self.style.configure("CardTitle.TLabel", background=CARD, foreground=TEXT, font=("Segoe UI", 12, "bold"))
+        self.style.configure("Body.TLabel", background=CARD, foreground=SUBTLE, font=("Segoe UI", 10))
+        self.style.configure("MetricLabel.TLabel", background=CARD, foreground=SUBTLE, font=("Segoe UI", 10))
+        self.style.configure("MetricValue.TLabel", background=CARD, foreground=TEXT, font=("Segoe UI", 18, "bold"))
+        self.style.configure("Small.TLabel", background=CARD, foreground=SUBTLE, font=("Segoe UI", 9))
+        self.style.configure("TButton", font=("Segoe UI", 10), padding=8)
+        self.style.configure("Treeview", font=("Segoe UI", 10), rowheight=28, fieldbackground=CARD, background=CARD)
+        self.style.configure("Treeview.Heading", font=("Segoe UI", 10, "bold"))
+        self.style.configure("TEntry", padding=6)
+
+    def _build_ui(self):
+        container = ttk.Frame(self.root, padding=18)
+        container.pack(fill="both", expand=True)
+        container.columnconfigure(0, weight=0)
+        container.columnconfigure(1, weight=1)
+        container.rowconfigure(1, weight=1)
+
+        header = ttk.Frame(container)
+        header.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 14))
+        ttk.Label(header, text="Portfolio Investment Tracker", style="Title.TLabel").pack(anchor="w")
+        ttk.Label(
+            header,
+            text="",
+            style="SubTitle.TLabel",
+        ).pack(anchor="w", pady=(4, 0))
+
+        self.left = ttk.Frame(container, style="Card.TFrame", padding=16)
+        self.left.grid(row=1, column=0, sticky="nsw", padx=(0, 14))
+        self.left.columnconfigure(1, weight=1)
+
+        self.right = ttk.Frame(container)
+        self.right.grid(row=1, column=1, sticky="nsew")
+        self.right.columnconfigure(0, weight=1)
+        self.right.rowconfigure(1, weight=1)
+
+        self._build_left_panel()
+        self._build_right_panel()
+
+    def _build_left_panel(self):
+        ttk.Label(self.left, text="Inputs", style="CardTitle.TLabel").grid(row=0, column=0, columnspan=2, sticky="w")
+        ttk.Label(self.left, text="Enter tickers and portfolio weights.", style="Body.TLabel").grid(
+            row=1, column=0, columnspan=2, sticky="w", pady=(2, 12)
+        )
+
+        ttk.Label(self.left, text="Initial Investment", style="Body.TLabel").grid(row=2, column=0, sticky="w", pady=4)
+        self.initial_entry = ttk.Entry(self.left)
+        self.initial_entry.insert(0, "25000")
+        self.initial_entry.grid(row=2, column=1, sticky="ew", pady=4)
+
+        action_row = ttk.Frame(self.left, style="Card.TFrame")
+        action_row.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(10, 12))
+        ttk.Button(action_row, text="Add Holding", command=lambda: self.add_row("", 0)).pack(side="left")
+        ttk.Button(action_row, text="Remove Last", command=self.remove_last_row).pack(side="left", padx=(8, 0))
+        ttk.Button(action_row, text="Rebalance to 100%", command=self.rebalance_to_100).pack(side="left", padx=(8, 0))
+
+        ttk.Label(self.left, text="Holdings", style="CardTitle.TLabel").grid(row=4, column=0, columnspan=2, sticky="w", pady=(4, 6))
+
+        self.rows_frame = ttk.Frame(self.left, style="Card.TFrame")
+        self.rows_frame.grid(row=5, column=0, columnspan=2, sticky="ew")
+
+        ttk.Label(self.rows_frame, text="Ticker", style="Small.TLabel").grid(row=0, column=0, padx=4, pady=(0, 6), sticky="w")
+        ttk.Label(self.rows_frame, text="Alloc %", style="Small.TLabel").grid(row=0, column=1, padx=4, pady=(0, 6), sticky="w")
+
+        btn_run = ttk.Button(self.left, text="Run Portfolio", command=self.run)
+        btn_run.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(14, 8))
+
+        self.alloc_status = tk.StringVar(value="")
+        ttk.Label(self.left, textvariable=self.alloc_status, style="Body.TLabel", wraplength=320).grid(
+            row=7, column=0, columnspan=2, sticky="w", pady=(0, 10)
+        )
+
+        ttk.Label(self.left, text="Live Output", style="CardTitle.TLabel").grid(row=8, column=0, columnspan=2, sticky="w", pady=(8, 6))
+        self.output = tk.Text(
+            self.left,
+            height=16,
+            width=38,
+            bg="#f8fafc",
+            fg=TEXT,
+            relief="solid",
+            bd=1,
+            highlightthickness=0,
+            font=("Consolas", 10),
+            wrap="word",
+        )
+        self.output.grid(row=9, column=0, columnspan=2, sticky="nsew")
+
+    def _build_right_panel(self):
+        metrics_row = ttk.Frame(self.right)
+        metrics_row.grid(row=0, column=0, sticky="ew", pady=(0, 14))
+        for i in range(4):
+            metrics_row.columnconfigure(i, weight=1)
+
+        for idx, (label, key) in enumerate([
+            ("Portfolio Value", "value"),
+            ("Expected Return", "return"),
+            ("Portfolio Volatility", "vol"),
+            ("Benchmark", "benchmark"),
+        ]):
+            card = ttk.Frame(metrics_row, style="Card.TFrame", padding=14)
+            card.grid(row=0, column=idx, sticky="nsew", padx=(0 if idx == 0 else 10, 0))
+            ttk.Label(card, text=label, style="MetricLabel.TLabel").pack(anchor="w")
+            val = ttk.Label(card, text="-", style="MetricValue.TLabel")
+            val.pack(anchor="w", pady=(8, 0))
+            self.metric_values[key] = val
+
+        body = ttk.Frame(self.right)
+        body.grid(row=1, column=0, sticky="nsew")
+        body.columnconfigure(0, weight=3)
+        body.columnconfigure(1, weight=2)
+        body.rowconfigure(0, weight=1)
+        body.rowconfigure(1, weight=1)
+
+        chart_card = ttk.Frame(body, style="Card.TFrame", padding=12)
+        chart_card.grid(row=0, column=0, rowspan=2, sticky="nsew", padx=(0, 14))
+        ttk.Label(chart_card, text="Charts", style="CardTitle.TLabel").pack(anchor="w")
+        ttk.Label(chart_card, text="Price history, allocation mix, and return-volatility comparison.", style="Body.TLabel").pack(anchor="w", pady=(2, 8))
+
+        self.fig = Figure(figsize=(10, 7), dpi=100)
+        self.ax_price = self.fig.add_subplot(221)
+        self.ax_alloc = self.fig.add_subplot(222)
+        self.ax_bar = self.fig.add_subplot(223)
+        self.ax_scatter = self.fig.add_subplot(224)
+        self.fig.tight_layout(pad=2.5)
+
+        self.canvas = FigureCanvasTkAgg(self.fig, master=chart_card)
+        self.canvas.get_tk_widget().pack(fill="both", expand=True)
+
+        holdings_card = ttk.Frame(body, style="Card.TFrame", padding=12)
+        holdings_card.grid(row=0, column=1, sticky="nsew")
+        ttk.Label(holdings_card, text="Holdings Summary", style="CardTitle.TLabel").pack(anchor="w")
+
+        cols = ("Ticker", "Weight", "Price", "Return", "Volatility")
+        self.tree = ttk.Treeview(holdings_card, columns=cols, show="headings", height=8)
+        for col in cols:
+            self.tree.heading(col, text=col)
+            self.tree.column(col, anchor="center", width=96)
+        self.tree.pack(fill="both", expand=True, pady=(8, 0))
+
+        lower = ttk.Frame(body)
+        lower.grid(row=1, column=1, sticky="nsew")
+        lower.rowconfigure(0, weight=1)
+        lower.rowconfigure(1, weight=1)
+        lower.columnconfigure(0, weight=1)
+
+        summary_card = ttk.Frame(lower, style="Card.TFrame", padding=12)
+        summary_card.grid(row=0, column=0, sticky="nsew", pady=(0, 7))
+        ttk.Label(summary_card, text="Portfolio Summary", style="CardTitle.TLabel").pack(anchor="w", pady=(0, 8))
+        self.summary_box = ttk.Frame(summary_card, style="Card.TFrame")
+        self.summary_box.pack(fill="both", expand=True)
+
+        risk_card = ttk.Frame(lower, style="Card.TFrame", padding=12)
+        risk_card.grid(row=1, column=0, sticky="nsew", pady=(7, 0))
+        ttk.Label(risk_card, text="Risk Summary", style="CardTitle.TLabel").pack(anchor="w", pady=(0, 8))
+        self.risk_box = ttk.Frame(risk_card, style="Card.TFrame")
+        self.risk_box.pack(fill="both", expand=True)
+
+        for parent, store, labels in [
+            (self.summary_box, self.summary_values, ["Initial investment", "Latest portfolio value", "Weighted return", "Weighted volatility"]),
+            (self.risk_box, self.risk_values, ["Top holding", "Lowest vol holding", "Highest return holding", f"Benchmark ({BENCHMARK})", "Data points"]),
+        ]:
+            for text in labels:
+                row = ttk.Frame(parent, style="Card.TFrame")
+                row.pack(fill="x", pady=2)
+                ttk.Label(row, text=text, style="Body.TLabel").pack(side="left")
+                value = ttk.Label(row, text="-", style="Body.TLabel")
+                value.pack(side="right")
+                store[text] = value
+
+    def add_row(self, ticker: str, alloc: float):
+        row_num = len(self.entries) + 1
+        ticker_var = tk.StringVar(value=ticker)
+        alloc_var = tk.StringVar(value=str(alloc))
+
+        ticker_entry = ttk.Entry(self.rows_frame, textvariable=ticker_var, width=12)
+        alloc_entry = ttk.Entry(self.rows_frame, textvariable=alloc_var, width=10)
+        ticker_entry.grid(row=row_num, column=0, padx=4, pady=4, sticky="ew")
+        alloc_entry.grid(row=row_num, column=1, padx=4, pady=4, sticky="ew")
+
+        self.entries.append({
+            "ticker": ticker_var,
+            "alloc": alloc_var,
+            "widgets": [ticker_entry, alloc_entry],
+        })
+        self.update_allocation_status()
+
+    def remove_last_row(self):
+        if not self.entries:
+            return
+        last = self.entries.pop()
+        for widget in last["widgets"]:
+            widget.destroy()
+        self.update_allocation_status()
+
+    def get_holdings(self) -> List[Holding]:
+        holdings = []
+        for row in self.entries:
+            ticker = row["ticker"].get().strip().upper()
+            alloc_text = row["alloc"].get().strip()
+
+            if not ticker and not alloc_text:
+                continue
+            if not ticker:
+                raise ValueError("One of the ticker fields is empty.")
+
+            try:
+                alloc = float(alloc_text)
+            except ValueError:
+                raise ValueError(f"Allocation for {ticker} must be numeric.")
+
+            holdings.append(Holding(ticker=ticker, allocation=alloc))
+
+        if not holdings:
+            raise ValueError("Add at least one holding.")
+        return holdings
+
+    def update_allocation_status(self):
+        total = 0.0
+        for row in self.entries:
+            try:
+                total += float(row["alloc"].get() or 0)
+            except ValueError:
+                pass
+
+        if abs(total - 100) <= 0.2:
+            self.alloc_status.set(f"Total allocation: {fmt_pct(total, 1)} — weights are balanced.")
+        else:
+            self.alloc_status.set(f"Total allocation: {fmt_pct(total, 1)} — rebalancing to 100% is recommended.")
+
+    def rebalance_to_100(self):
+        try:
+            vals = [float(row["alloc"].get()) for row in self.entries]
+        except ValueError:
+            messagebox.showerror("Rebalance Error", "All allocations must be numeric before rebalancing.")
+            return
+
+        total = sum(vals)
+        if total == 0:
+            messagebox.showerror("Rebalance Error", "Total allocation cannot be zero.")
+            return
+
+        running = 0.0
+        for i, row in enumerate(self.entries):
+            if i < len(self.entries) - 1:
+                new_val = round(vals[i] / total * 100, 1)
+                running += new_val
+            else:
+                new_val = round(100 - running, 1)
+            row["alloc"].set(str(new_val))
+
+        self.update_allocation_status()
+
+    def run(self):
+        try:
+            holdings = self.get_holdings()
+            initial_investment = float(self.initial_entry.get())
+            if initial_investment <= 0:
+                raise ValueError("Initial investment must be positive.")
+        except ValueError as e:
+            messagebox.showerror("Input Error", str(e))
+            return
+
+        self.output.delete("1.0", tk.END)
+        self.output.insert(tk.END, "Fetching live data...\n\n")
+        self.root.update_idletasks()
+
+        total_alloc = sum(h.allocation for h in holdings)
+        if total_alloc == 0:
+            messagebox.showerror("Input Error", "Allocation cannot be zero.")
+            return
+
+        normalized = []
+        portfolio_returns = None
+        price_history = {}
+
+        try:
+            self.output.insert(tk.END, f'Fetching benchmark "{BENCHMARK}"...\n')
+            self.root.update_idletasks()
+            benchmark_prices, benchmark_returns = fetch_daily_data(BENCHMARK)
+            time.sleep(12)
+
+            for h in holdings:
+                self.output.insert(tk.END, f'Fetching "{h.ticker}"...\n')
+                self.root.update_idletasks()
+
+                prices, returns = fetch_daily_data(h.ticker)
+                h.price = float(prices.iloc[-1])
+                h.ret, h.vol = compute_metrics(returns)
+                weight = h.allocation / total_alloc
+                normalized.append((h, weight))
+
+                aligned_returns = returns.reindex(benchmark_returns.index).dropna()
+                price_history[h.ticker] = prices.tail(60)
+
+                weighted_series = aligned_returns * weight
+                portfolio_returns = weighted_series if portfolio_returns is None else portfolio_returns.add(weighted_series, fill_value=0)
+
+                self.output.insert(tk.END, f"{h.ticker}\n")
+                self.output.insert(tk.END, f"  Latest Price: {fmt_money(h.price)}\n")
+                self.output.insert(tk.END, f"  Annual Return: {fmt_pct(h.ret)}\n")
+                self.output.insert(tk.END, f"  Volatility: {fmt_pct(h.vol)}\n\n")
+                self.root.update_idletasks()
+                time.sleep(12)
+
+            portfolio_returns = portfolio_returns.dropna()
+            if portfolio_returns.empty:
+                raise ValueError("No overlapping return history was available for the selected holdings.")
+
+            portfolio_value = initial_investment * (1 + portfolio_returns).cumprod()
+            weighted_return = sum(h.ret * w for h, w in normalized)
+            weighted_vol = math.sqrt(sum((h.vol * w) ** 2 for h, w in normalized))
+
+            self.metric_values["value"].config(text=fmt_money(float(portfolio_value.iloc[-1])))
+            self.metric_values["return"].config(text=fmt_pct(weighted_return))
+            self.metric_values["vol"].config(text=fmt_pct(weighted_vol))
+            self.metric_values["benchmark"].config(text=BENCHMARK)
+
+            self.summary_values["Initial investment"].config(text=fmt_money(initial_investment))
+            self.summary_values["Latest portfolio value"].config(text=fmt_money(float(portfolio_value.iloc[-1])))
+            self.summary_values["Weighted return"].config(text=fmt_pct(weighted_return))
+            self.summary_values["Weighted volatility"].config(text=fmt_pct(weighted_vol))
+
+            top_holding = max(normalized, key=lambda x: x[1])[0].ticker
+            low_vol = min(holdings, key=lambda x: x.vol).ticker
+            high_ret = max(holdings, key=lambda x: x.ret).ticker
+
+            self.risk_values["Top holding"].config(text=top_holding)
+            self.risk_values["Lowest vol holding"].config(text=low_vol)
+            self.risk_values["Highest return holding"].config(text=high_ret)
+            self.risk_values[f"Benchmark ({BENCHMARK})"].config(text=f"{len(benchmark_returns)} days")
+            self.risk_values["Data points"].config(text=str(len(portfolio_returns)))
+
+            for item in self.tree.get_children():
+                self.tree.delete(item)
+
+            for h, w in normalized:
+                self.tree.insert(
+                    "",
+                    "end",
+                    values=(
+                        h.ticker,
+                        fmt_pct(w * 100, 1),
+                        fmt_money(h.price),
+                        fmt_pct(h.ret),
+                        fmt_pct(h.vol),
+                    ),
+                )
+
+            self._redraw_charts(price_history, benchmark_prices.tail(60), holdings, normalized)
+            self.output.insert(tk.END, "Done. Dashboard updated with live data.\n")
+            self.update_allocation_status()
+
+        except Exception as e:
+            messagebox.showerror("Run Error", str(e))
+
+    def _redraw_charts(self, price_history, benchmark_prices, holdings, normalized):
+        self.ax_price.clear()
+        self.ax_alloc.clear()
+        self.ax_bar.clear()
+        self.ax_scatter.clear()
+
+        for ticker, prices in price_history.items():
+            self.ax_price.plot(prices.index, prices.values, linewidth=2, label=ticker)
+
+        self.ax_price.plot(benchmark_prices.index, benchmark_prices.values, linewidth=2, linestyle="--", label=BENCHMARK)
+        self.ax_price.set_title("Recent Price History")
+        self.ax_price.tick_params(axis="x", rotation=25)
+        self.ax_price.grid(True, alpha=0.3)
+        self.ax_price.legend(fontsize=8)
+
+        allocs = [w * 100 for _, w in normalized]
+        labels = [h.ticker for h, _ in normalized]
+        colors = [PIE_COLORS[i % len(PIE_COLORS)] for i in range(len(labels))]
+        self.ax_alloc.pie(allocs, labels=labels, autopct="%1.1f%%", startangle=90, colors=colors)
+        self.ax_alloc.set_title("Allocation Mix")
+
+        x = np.arange(len(holdings))
+        width = 0.35
+        returns = [h.ret for h in holdings]
+        vols = [h.vol for h in holdings]
+        self.ax_bar.bar(x - width / 2, returns, width=width, label="Return %")
+        self.ax_bar.bar(x + width / 2, vols, width=width, label="Volatility %")
+        self.ax_bar.set_xticks(x)
+        self.ax_bar.set_xticklabels([h.ticker for h in holdings])
+        self.ax_bar.set_title("Return vs Volatility")
+        self.ax_bar.grid(True, axis="y", alpha=0.3)
+        self.ax_bar.legend(fontsize=8)
+
+        self.ax_scatter.scatter(returns, vols, s=90)
+        for h in holdings:
+            self.ax_scatter.annotate(h.ticker, (h.ret, h.vol), textcoords="offset points", xytext=(6, 6), fontsize=8)
+        self.ax_scatter.set_xlabel("Return %")
+        self.ax_scatter.set_ylabel("Volatility %")
+        self.ax_scatter.set_title("Risk / Return Map")
+        self.ax_scatter.grid(True, alpha=0.3)
+
+        self.fig.tight_layout(pad=2.2)
+        self.canvas.draw()
+
+
+def main():
+    root = tk.Tk()
+    App(root)
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    main()
