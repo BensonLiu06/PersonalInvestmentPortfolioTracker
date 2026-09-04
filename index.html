@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Portfolio Investment Tracker</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+</head>
+<body>
+  <main class="page">
+    <header class="header">
+      <div>
+        <p class="eyebrow">FINANCIAL ANALYTICS</p>
+        <h1>Portfolio Investment Tracker</h1>
+        <p class="subtitle">Analyze portfolio performance, risk, allocation, and recent market history.</p>
+      </div>
+      <div class="status-pill" id="apiStatus">Ready</div>
+    </header>
+
+    <section class="layout">
+      <aside class="card sidebar">
+        <div class="section-title">
+          <h2>Inputs</h2>
+          <p>Enter tickers and portfolio weights.</p>
+        </div>
+
+        <label class="field">
+          <span>Initial Investment</span>
+          <input id="initialInvestment" type="number" min="0" step="100" value="25000" />
+        </label>
+
+        <div class="button-row">
+          <button class="button secondary" id="addHolding">Add Holding</button>
+          <button class="button secondary" id="removeHolding">Remove Last</button>
+          <button class="button secondary" id="rebalance">Rebalance</button>
+        </div>
+
+        <div class="holdings-header">
+          <span>Ticker</span>
+          <span>Allocation %</span>
+        </div>
+        <div id="holdingInputs"></div>
+
+        <div class="allocation-status" id="allocationStatus"></div>
+        <button class="button primary full" id="runPortfolio">Run Portfolio</button>
+
+        <div class="live-output">
+          <h3>Live Output</h3>
+          <pre id="output">Waiting for portfolio input...</pre>
+        </div>
+      </aside>
+
+      <section class="dashboard">
+        <div class="metrics-grid">
+          <article class="card metric-card">
+            <span>Portfolio Value</span>
+            <strong id="metricValue">—</strong>
+          </article>
+          <article class="card metric-card">
+            <span>Expected Return</span>
+            <strong id="metricReturn">—</strong>
+          </article>
+          <article class="card metric-card">
+            <span>Portfolio Volatility</span>
+            <strong id="metricVol">—</strong>
+          </article>
+          <article class="card metric-card">
+            <span>Benchmark</span>
+            <strong id="metricBenchmark">—</strong>
+          </article>
+        </div>
+
+        <div class="content-grid">
+          <section class="card charts-card">
+            <div class="section-title">
+              <h2>Charts</h2>
+              <p>Price history, allocation mix, and return-volatility comparison.</p>
+            </div>
+
+            <div class="charts-grid">
+              <div class="chart-wrap"><canvas id="priceChart"></canvas></div>
+              <div class="chart-wrap"><canvas id="allocationChart"></canvas></div>
+              <div class="chart-wrap"><canvas id="barChart"></canvas></div>
+              <div class="chart-wrap"><canvas id="scatterChart"></canvas></div>
+            </div>
+          </section>
+
+          <div class="side-stack">
+            <section class="card">
+              <div class="section-title compact"><h2>Holdings Summary</h2></div>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Ticker</th>
+                      <th>Weight</th>
+                      <th>Price</th>
+                      <th>Return</th>
+                      <th>Volatility</th>
+                    </tr>
+                  </thead>
+                  <tbody id="holdingsTable">
+                    <tr><td colspan="5" class="empty">Run a portfolio to populate this table.</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </section>
+
+            <section class="card summary-card">
+              <div class="section-title compact"><h2>Portfolio Summary</h2></div>
+              <div class="summary-list" id="portfolioSummary"></div>
+            </section>
+
+            <section class="card summary-card">
+              <div class="section-title compact"><h2>Risk Summary</h2></div>
+              <div class="summary-list" id="riskSummary"></div>
+            </section>
+          </div>
+        </div>
+      </section>
+    </section>
+  </main>
+
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
